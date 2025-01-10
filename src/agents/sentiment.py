@@ -1,27 +1,33 @@
-
 from langchain_core.messages import HumanMessage
-
-from agents.state import AgentState, show_agent_reasoning
-
+from graph.state import AgentState, show_agent_reasoning
+import pandas as pd
+import numpy as np
 import json
 
+from tools.api import get_insider_trades
+
 ##### Sentiment Agent #####
+
+
 def sentiment_agent(state: AgentState):
     """Analyzes market sentiment and generates trading signals."""
-    data = state["data"]
-    insider_trades = data["insider_trades"]
-    show_reasoning = state["metadata"]["show_reasoning"]
+    data = state.get("data", {})
+    end_date = data.get("end_date")
+    ticker = data.get("ticker")
 
-    # Loop through the insider trades, if transaction_shares is negative, then it is a sell, which is bearish, if positive, then it is a buy, which is bullish
-    signals = []
-    for trade in insider_trades:
-        transaction_shares = trade["transaction_shares"]
-        if not transaction_shares:
-            continue
-        if transaction_shares < 0:
-            signals.append("bearish")
-        else:
-            signals.append("bullish")
+    # Get the insider trades
+    insider_trades = get_insider_trades(
+        ticker=ticker,
+        end_date=end_date,
+        limit=5,
+    )
+
+    # Get the signals from the insider trades
+    transaction_shares = pd.Series(
+        [t.get("transaction_shares") for t in insider_trades]
+    ).dropna()
+    bearish_condition = transaction_shares < 0
+    signals = np.where(bearish_condition, "bearish", "bullish").tolist()
 
     # Determine overall signal
     bullish_signals = signals.count("bullish")
@@ -35,16 +41,21 @@ def sentiment_agent(state: AgentState):
 
     # Calculate confidence level based on the proportion of indicators agreeing
     total_signals = len(signals)
-    confidence = max(bullish_signals, bearish_signals) / total_signals
+    confidence = 0  # Default confidence when there are no signals
+    if total_signals > 0:
+        confidence = round(max(bullish_signals, bearish_signals) / total_signals, 2) * 100
+    reasoning = (
+        f"Bullish signals: {bullish_signals}, Bearish signals: {bearish_signals}"
+    )
 
     message_content = {
         "signal": overall_signal,
-        "confidence": f"{round(confidence * 100)}%",
-        "reasoning": f"Bullish signals: {bullish_signals}, Bearish signals: {bearish_signals}"
+        "confidence": confidence,
+        "reasoning": reasoning,
     }
 
     # Print the reasoning if the flag is set
-    if show_reasoning:
+    if state["metadata"]["show_reasoning"]:
         show_agent_reasoning(message_content, "Sentiment Analysis Agent")
 
     # Create the sentiment message
@@ -52,6 +63,13 @@ def sentiment_agent(state: AgentState):
         content=json.dumps(message_content),
         name="sentiment_agent",
     )
+
+    # Add the signal to the analyst_signals list
+    state["data"]["analyst_signals"]["sentiment_agent"] = {
+        "signal": overall_signal,
+        "confidence": confidence,
+        "reasoning": reasoning,
+    }
 
     return {
         "messages": [message],
